@@ -40,6 +40,16 @@ First build pulls `eframe`/`egui` (~3 min). Subsequent builds are fast.
 | Esc | Quit |
 ⚙
 
+While a piece is selected, empty destinations get a small green dot and every
+piece that move would capture gets a green ring — including the enemy piece a
+**dama jump hops over** (it sits between the piece and the landing dot) and a
+pawn taken **en passant**.
+
+Both captures land on an *empty* square, so either square can be clicked:
+the landing dot, or the ringed piece itself. Clicking the ringed piece plays
+the capture that claims it (when exactly one move does), which matches the
+chess-capture habit of clicking the piece you want to take.
+
 ## Rules (as ported)
 
 - Starting position has only **rooks, knights, and pawns** on both sides — no king, no queen, no bishop.
@@ -79,10 +89,12 @@ If you'd prefer PNG sprites, replace the `ui.painter().text(...)` block in `dama
 ## Testing
 
 ```
-cargo test -p dama-core
+cargo test --workspace
 ```
 
-Seventeen tests cover piece counts, pawn pushes, en passant (including the pinned case), check detection with blockers, dama-jump checks, checkmate detection, king absence at start, per-colour promotion bookkeeping, the interactive promotion round-trip, king-promotion tracking (registration, undo, rejection of a second king, and both branches of the first-promotion king placement), placing/undoing an enemy king from a highlighted pawn, and two-move undo (including skipping a king-placement side effect).
+Eighteen `dama-core` tests cover piece counts, pawn pushes, en passant from both colours (including the pinned case), check detection with blockers, dama-jump checks, checkmate detection, king absence at start, per-colour promotion bookkeeping, the interactive promotion round-trip, king-promotion tracking (registration, undo, rejection of a second king, and both branches of the first-promotion king placement), placing/undoing an enemy king from a highlighted pawn, and two-move undo (including skipping a king-placement side effect).
+
+Seven `dama-ui` tests cover the board highlights and click handling. Two of them repaint the board into an offscreen `egui::Context` and inspect the emitted shapes, so the assertions are about pixels-to-be rather than about state: a dama take must paint a green ring centred on the jumped piece and a dot on the empty landing square, and a chess capture must keep its ring on the destination square. The rest drive `handle_click` end to end — en passant played through the landing square and through the ringed pawn, and a dama take played by clicking the jumped piece.
 
 ## License
 

@@ -953,6 +953,40 @@ mod tests {
     }
 
     #[test]
+    fn black_en_passant_captures_a_white_double_push() {
+        // Mirror of `en_passant_round_trip`: the black pawn takes towards the
+        // bottom of the screen, so `dir` and the passed square are the other way
+        // round. A white double push 6->4 sets the skipped square on row 5.
+        let mut gs = empty_state();
+        gs.white_to_move = true;
+        gs.board[6][1] = Some(Piece::new(Color::White, Kind::Pawn));
+        gs.board[4][0] = Some(Piece::new(Color::Black, Kind::Pawn));
+
+        let double_push = find_move(&gs, (6, 1), (4, 1)).unwrap();
+        gs.apply(double_push);
+        assert_eq!(gs.en_passant, Some((5, 1)));
+
+        let here: Vec<Move> = gs
+            .legal_moves()
+            .into_iter()
+            .filter(|m| m.from == (4, 0) && m.to == (5, 1))
+            .collect();
+        assert_eq!(here.len(), 1, "black en passant capture missing");
+        assert_eq!(
+            here[0].captured.map(|(p, sq)| (p.color, sq)),
+            Some((Color::White, (4, 1))),
+            "victim is the pawn beside the capturer, not the landing square"
+        );
+
+        gs.apply(here[0]);
+        assert!(gs.board[4][1].is_none(), "white pawn removed");
+        assert_eq!(
+            gs.board[5][1].map(|p| (p.color, p.kind)),
+            Some((Color::Black, Kind::Pawn))
+        );
+    }
+
+    #[test]
     fn kings_start_absent() {
         let gs = GameState::new();
         assert!(gs.white_king.is_none());

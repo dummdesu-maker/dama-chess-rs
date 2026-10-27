@@ -38,9 +38,37 @@ struct DamaApp {
     last_move: Option<(Square, Square)>,
 }
 
+/// What the board should highlight for the current selection:
+/// `(destinations, enemy squares that would be captured)`.
+///
+/// The capture squares are read from `Move::captured` rather than inferred
+/// from "the destination is occupied". That inference only holds for chess
+/// captures, where the victim stands on the destination; a dama jump lands on
+/// the empty square *beyond* its victim, and en passant lands diagonally in
+/// front of it.
+fn selection_highlights(legal: &[Move], selected: Option<Square>) -> (Vec<Square>, Vec<Square>) {
+    let mut targets = Vec::new();
+    let mut captures = Vec::new();
+    let Some(from) = selected else {
+        return (targets, captures);
+    };
+    for mv in legal.iter().filter(|m| m.from == from) {
+        targets.push(mv.to);
+        if let Some((_, victim)) = mv.captured {
+            captures.push(victim);
+        }
+    }
+    (targets, captures)
+}
+
 impl DamaApp {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        let state = GameState::new();
+        Self::with_state(GameState::new())
+    }
+
+    /// Split out from [`Self::new`] so tests can build an app from an arbitrary
+    /// position without an `eframe::CreationContext`.
+    fn with_state(state: GameState) -> Self {
         let legal = state.legal_moves();
         Self {
             state,
@@ -137,14 +165,30 @@ impl DamaApp {
             return;
         };
 
-        if let Some(sel) = *selected {
-            if let Some(mv) = legal.iter().find(|m| m.from == sel && m.to == sq).copied() {
-                let from = mv.from;
-                let outcome = self.state.apply(mv);
-                self.last_move = Some((from, sq));
-                self.handle_outcome(outcome);
-                return;
+        // Resolve the click into a move *before* mutating `self`, so the borrow
+        // of `self.phase` is done by the time we apply anything.
+        let chosen = (*selected).and_then(|sel| {
+            // 1. The clicked square is a destination.
+            if let Some(mv) = legal.iter().find(|m| m.from == sel && m.to == sq) {
+                return Some(*mv);
             }
+            // 2. The clicked square holds a piece this move captures, but is not
+            //    the destination: a dama jump lands *beyond* its victim and an
+            //    en-passant capture lands *in front of* one. The victim is the
+            //    piece the player aims at, so accept it when exactly one move
+            //    claims it — the landing square works either way.
+            let mut claims = legal
+                .iter()
+                .filter(|m| m.from == sel && m.captured.is_some_and(|(_, victim)| victim == sq));
+            match (claims.next(), claims.next()) {
+                (Some(mv), None) => Some(*mv),
+                _ => None,
+            }
+        });
+
+        if let Some(mv) = chosen {
+            self.play(mv);
+            return;
         }
 
         let own = self.state.board[sq.0][sq.1]
@@ -159,6 +203,14 @@ impl DamaApp {
         } else {
             *selected = None;
         }
+    }
+
+    /// Apply `mv` and move the UI to whatever phase the outcome requires.
+    fn play(&mut self, mv: Move) {
+        let from = mv.from;
+        let outcome = self.state.apply(mv);
+        self.last_move = Some((from, mv.to));
+        self.handle_outcome(outcome);
     }
 
     fn draw_status(&mut self, ui: &mut egui::Ui) {
@@ -214,18 +266,26 @@ impl DamaApp {
         // of `self.phase` is live when we call `self.handle_click`. Also:
         // filter destinations by the selected square — the Python original did
         // this; my first pass forgot it and highlighted every legal move.
-        let (selected, legal_targets, king_candidates): (Option<Square>, Vec<Square>, Vec<Square>) =
-            match &self.phase {
-                Phase::Playing { selected, legal } => {
-                    let targets = match *selected {
-                        Some(f) => legal.iter().filter(|m| m.from == f).map(|m| m.to).collect(),
-                        None => Vec::new(),
-                    };
-                    (*selected, targets, Vec::new())
-                }
-                Phase::KingPlacement { candidates, .. } => (None, Vec::new(), candidates.clone()),
-                _ => (None, Vec::new(), Vec::new()),
-            };
+        //
+        // Captures are collected from `Move::captured` rather than inferred
+        // from "destination square is occupied": that inference only works for
+        // chess captures, where the victim *is* the destination. Dama jumps and
+        // en passant land on an empty square and leave the victim elsewhere.
+        let (selected, legal_targets, capture_targets, king_candidates): (
+            Option<Square>,
+            Vec<Square>,
+            Vec<Square>,
+            Vec<Square>,
+        ) = match &self.phase {
+            Phase::Playing { selected, legal } => {
+                let (targets, captures) = selection_highlights(legal, *selected);
+                (*selected, targets, captures, Vec::new())
+            }
+            Phase::KingPlacement { candidates, .. } => {
+                (None, Vec::new(), Vec::new(), candidates.clone())
+            }
+            _ => (None, Vec::new(), Vec::new(), Vec::new()),
+        };
 
         let white_in_check = self.state.is_in_check(Color::White);
         let black_in_check = self.state.is_in_check(Color::Black);
@@ -263,17 +323,23 @@ impl DamaApp {
                     ui.painter().rect_filled(rect, 0.0, sel_color);
                 }
 
-                if legal_targets.contains(&(r, c)) {
-                    if self.state.board[r][c].is_some() {
-                        ui.painter().circle_stroke(
-                            rect.center(),
-                            sq * 0.42,
-                            egui::Stroke::new(sq * 0.06, dot_color),
-                        );
-                    } else {
-                        ui.painter()
-                            .circle_filled(rect.center(), sq * 0.14, dot_color);
-                    }
+                // A green ring marks a piece that dies: the destination of a
+                // chess capture, the victim a dama jump hops over, or a pawn
+                // taken en passant. Quiet destinations get a small green dot.
+                // Ringing `capture_targets` is what makes the dama take show
+                // up on the jumped piece, which sits between `from` and `to`.
+                let is_capture_square = capture_targets.contains(&(r, c));
+                if is_capture_square
+                    || (legal_targets.contains(&(r, c)) && self.state.board[r][c].is_some())
+                {
+                    ui.painter().circle_stroke(
+                        rect.center(),
+                        sq * 0.42,
+                        egui::Stroke::new(sq * 0.06, dot_color),
+                    );
+                } else if legal_targets.contains(&(r, c)) {
+                    ui.painter()
+                        .circle_filled(rect.center(), sq * 0.14, dot_color);
                 }
 
                 if is_king_candidate {
@@ -323,7 +389,12 @@ impl DamaApp {
                 }
 
                 let resp = ui.interact(rect, egui::Id::new(("sq", r, c)), egui::Sense::click());
-                let resp = if is_king_candidate {
+                // Every square a click acts on gets the hand cursor, including
+                // the ringed victim of a dama jump or en passant (its landing
+                // square is empty, so the piece itself is the obvious target).
+                let actionable =
+                    is_king_candidate || is_capture_square || legal_targets.contains(&(r, c));
+                let resp = if actionable {
                     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
                 } else {
                     resp
@@ -487,4 +558,212 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| Ok(Box::new(DamaApp::new(cc)))),
     )
+}
+
+// ---------- tests ----------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dama_core::Piece;
+
+    /// A position whose only capture is a dama jump: the white knight on (3,3)
+    /// hops over the black rook on (2,2) and lands on the empty (1,1). No chess
+    /// move of the knight reaches (2,2), so the victim is only ever visible via
+    /// the jump.
+    fn dama_jump_state() -> GameState {
+        let mut gs = GameState::new();
+        gs.board = [[None; 8]; 8];
+        gs.white_to_move = true;
+        gs.board[3][3] = Some(Piece::new(Color::White, Kind::Knight));
+        gs.board[2][2] = Some(Piece::new(Color::Black, Kind::Rook));
+        gs
+    }
+
+    fn circle_centers(
+        shapes: &[egui::Shape],
+        predicate: impl Fn(&egui::epaint::CircleShape) -> bool,
+    ) -> Vec<egui::Pos2> {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Circle(c) if predicate(c) => Some(c.center),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Repaint the board headlessly and return `(shapes, square_origin, square_size)`.
+    fn paint_board(state: GameState, selected: Square) -> (Vec<egui::Shape>, egui::Pos2, f32) {
+        let mut app = DamaApp::with_state(state);
+        let legal = app.state.legal_moves();
+        app.phase = Phase::Playing {
+            selected: Some(selected),
+            legal,
+        };
+
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.draw_board(ui));
+        });
+        let shapes: Vec<egui::Shape> = output.shapes.into_iter().map(|s| s.shape).collect();
+
+        // The 64 square backgrounds are the only square-on shapes painted, so
+        // the panel's own (larger, also square) background is filtered out by
+        // taking the smallest square size as the tile size.
+        let board: Vec<egui::Rect> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Rect(r) if (r.rect.width() - r.rect.height()).abs() < 0.01 => {
+                    Some(r.rect)
+                }
+                _ => None,
+            })
+            .collect();
+        let sq = board
+            .iter()
+            .map(|r| r.width())
+            .fold(f32::INFINITY, f32::min);
+        let tiles: Vec<&egui::Rect> = board
+            .iter()
+            .filter(|r| (r.width() - sq).abs() < 0.01)
+            .collect();
+        assert!(tiles.len() >= 64, "expected at least the 64 board squares");
+        let origin = egui::pos2(
+            tiles.iter().map(|r| r.min.x).fold(f32::INFINITY, f32::min),
+            tiles.iter().map(|r| r.min.y).fold(f32::INFINITY, f32::min),
+        );
+        (shapes, origin, sq)
+    }
+
+    fn center(origin: egui::Pos2, sq: f32, square: Square) -> egui::Pos2 {
+        origin + egui::vec2((square.1 as f32 + 0.5) * sq, (square.0 as f32 + 0.5) * sq)
+    }
+
+    #[test]
+    fn dama_jump_reports_the_hopped_piece_as_the_capture() {
+        let gs = dama_jump_state();
+        let legal = gs.legal_moves();
+        let (targets, captures) = selection_highlights(&legal, Some((3, 3)));
+
+        assert!(targets.contains(&(1, 1)), "jump must land on (1,1)");
+        assert_eq!(captures, vec![(2, 2)], "the rook on (2,2) is the victim");
+        // Regression guard for the bug this test was written against: the
+        // victim is not a destination, so occupancy-based detection missed it.
+        assert!(!targets.contains(&(2, 2)));
+    }
+
+    #[test]
+    fn chess_capture_still_reports_the_destination() {
+        let mut gs = dama_jump_state();
+        // Knight hop (3,3) -> (1,2) onto a black pawn: victim == destination.
+        gs.board[1][2] = Some(Piece::new(Color::Black, Kind::Pawn));
+        let legal = gs.legal_moves();
+        let (targets, captures) = selection_highlights(&legal, Some((3, 3)));
+
+        assert!(targets.contains(&(1, 2)));
+        assert_eq!(captures.len(), 2, "one jump victim, one chess victim");
+        assert!(captures.contains(&(2, 2)), "jump over the rook");
+        assert!(captures.contains(&(1, 2)), "chess capture of the pawn");
+    }
+
+    #[test]
+    fn board_paints_a_ring_on_the_jumped_piece_and_a_dot_on_the_landing() {
+        let (shapes, origin, sq) = paint_board(dama_jump_state(), (3, 3));
+        let victim = center(origin, sq, (2, 2));
+        let landing = center(origin, sq, (1, 1));
+
+        let rings = circle_centers(&shapes, |c| {
+            c.stroke.width > 0.0 && (c.center - victim).length() < 1.0
+        });
+        assert_eq!(rings.len(), 1, "the hopped rook must be circled");
+        assert!(
+            (rings[0] - victim).length() < 1.0,
+            "ring must be centred on the jumped piece"
+        );
+
+        let dots = circle_centers(&shapes, |c| {
+            c.stroke.width == 0.0 && c.radius < sq * 0.3 && (c.center - landing).length() < 1.0
+        });
+        assert_eq!(dots.len(), 1, "the landing square must show a move dot");
+    }
+
+    #[test]
+    fn board_paints_a_ring_on_a_chess_capture_destination() {
+        let mut gs = dama_jump_state();
+        // A plain knight move with a victim standing on the destination:
+        // (3,3) -> (1,2) captures a black pawn on (1,2).
+        gs.board[1][2] = Some(Piece::new(Color::Black, Kind::Pawn));
+        let (shapes, origin, sq) = paint_board(gs, (3, 3));
+        let destination = center(origin, sq, (1, 2));
+
+        let rings = circle_centers(&shapes, |c| {
+            c.stroke.width > 0.0 && (c.center - destination).length() < 1.0
+        });
+        assert_eq!(rings.len(), 1, "chess capture destination must be circled");
+    }
+
+    /// Make a move the way the UI does: click the piece, then the target.
+    fn click_moves(app: &mut DamaApp, from: Square, to: Square) {
+        app.handle_click(from);
+        app.handle_click(to);
+    }
+
+    /// A position where White can take en passant onto the empty (2,2): the
+    /// white pawn walks up to row 3, then Black double-pushes beside it.
+    fn en_passant_ready() -> DamaApp {
+        let mut app = DamaApp::with_state(GameState::new());
+        click_moves(&mut app, (6, 1), (4, 1)); // white double push
+        click_moves(&mut app, (2, 3), (3, 3)); // black steps out
+        click_moves(&mut app, (4, 1), (3, 1)); // white pawn to row 3
+        click_moves(&mut app, (1, 2), (3, 2)); // black double push -> ep (2,2)
+        assert_eq!(app.state.en_passant, Some((2, 2)));
+        app
+    }
+
+    fn assert_en_passant_taken(app: &DamaApp) {
+        assert!(
+            app.state.board[3][2].is_none(),
+            "the passed pawn must be removed"
+        );
+        assert_eq!(
+            app.state.board[2][2].map(|p| (p.color, p.kind)),
+            Some((Color::White, Kind::Pawn)),
+            "the capturer lands on the skipped square"
+        );
+        assert_eq!(app.state.move_count(), 5);
+    }
+
+    #[test]
+    fn en_passant_plays_by_clicking_the_landing_square() {
+        let mut app = en_passant_ready();
+        click_moves(&mut app, (3, 1), (2, 2));
+        assert_en_passant_taken(&app);
+    }
+
+    #[test]
+    fn en_passant_plays_by_clicking_the_captured_pawn() {
+        let mut app = en_passant_ready();
+        click_moves(&mut app, (3, 1), (3, 2));
+        assert_en_passant_taken(&app);
+    }
+
+    #[test]
+    fn dama_jump_plays_by_clicking_the_jumped_piece() {
+        let mut app = DamaApp::with_state(dama_jump_state());
+        click_moves(&mut app, (3, 3), (2, 2));
+        assert!(app.state.board[2][2].is_none(), "the rook must be removed");
+        assert_eq!(
+            app.state.board[1][1].map(|p| p.kind),
+            Some(Kind::Knight),
+            "the jump still lands beyond the victim"
+        );
+    }
 }
