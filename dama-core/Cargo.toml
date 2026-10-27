@@ -1,0 +1,5 @@
+[package]
+name = "dama-core"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust game rules for Dama-Chess"

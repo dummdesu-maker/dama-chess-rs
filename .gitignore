@@ -1,0 +1,53 @@
+# Rust / Cargo ---------------------------------------------------------------
+
+# Build output. A bare `target/` matches nested ones too (dama-core/, dama-ui/).
+target/
+
+# Backups left behind by rustfmt / `cargo fix`.
+*.rs.bk
+
+# MSVC debug symbols and incremental-build leftovers that can escape `target/`.
+*.pdb
+*.idb
+
+# Coverage and profiling output (cargo-tarpaulin, llvm, cargo-flamegraph).
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+perf.data
+perf.data.*
+flamegraph.svg
+
+# NOTE: Cargo.lock is intentionally tracked. This workspace ships binaries
+# (`dama-ui` -> `dama-chess`), so the resolved dependency graph belongs in git.
+
+# Editors / IDEs --------------------------------------------------------------
+
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*.sublime-workspace
+.helix/
+*~
+
+# OS cruft --------------------------------------------------------------------
+
+.DS_Store
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Local scratch ---------------------------------------------------------------
+
+*.log
+*.tmp
+*.orig
+*.rej
+.env
+.env.*
+!.env.example

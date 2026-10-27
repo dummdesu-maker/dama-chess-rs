@@ -1,0 +1,12 @@
+[package]
+name = "dama-ui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dama-core = { path = "../dama-core" }
+eframe = "0.29"
+
+[[bin]]
+name = "dama-chess"
+path = "src/main.rs"
